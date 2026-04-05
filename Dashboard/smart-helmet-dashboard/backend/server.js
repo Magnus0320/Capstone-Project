@@ -1,8 +1,35 @@
 import express from "express";
 import cors from "cors";
+import { initializeDatabase } from "./database/init.js";
+import {
+  insertSensorReading,
+  insertAlert,
+  getSensorReadings,
+  getAlertHistory,
+  getSensorTrends,
+  getAverageByHour,
+  updateMinerProfile,
+  getAllMiners,
+  getMinerLatestData,
+  createRescueMission
+} from "./database/queries.js";
 
 const app = express();
 const PORT = 4000;
+
+// Initialize database on startup (async)
+let db;
+(async () => {
+  try {
+    db = await initializeDatabase();
+    app.listen(PORT, "0.0.0.0", () => {
+      console.log("Backend running on http://0.0.0.0:4000");
+    });
+  } catch (err) {
+    console.error("Failed to initialize database:", err);
+    process.exit(1);
+  }
+})();
 
 app.use(cors());
 app.use(express.json());
@@ -228,15 +255,30 @@ app.post("/api/data", (req, res) => {
 
   const alerts = evaluateAlerts(latestData);
   alerts.forEach((a) => {
+    const alertId = Date.now().toString() + "-" + Math.random().toString(16).slice(2);
     alertHistory.push({
-      id: Date.now().toString() + "-" + Math.random().toString(16).slice(2),
+      id: alertId,
       timestamp: new Date().toISOString(),
       ...a
     });
+
+    // Write alert to database
+    try {
+      insertAlert(alertId, latestData.minerId, a);
+    } catch (err) {
+      console.error("Failed to insert alert to database:", err);
+    }
   });
 
   if (alertHistory.length > MAX_ALERT_HISTORY) {
     alertHistory.splice(0, alertHistory.length - MAX_ALERT_HISTORY);
+  }
+
+  // Write sensor reading to database
+  try {
+    insertSensorReading(latestData.minerId, latestData, latestData.location);
+  } catch (err) {
+    console.error("Failed to insert sensor reading to database:", err);
   }
 
   return res.status(200).json({
@@ -250,6 +292,106 @@ app.get("/health", (req, res) => {
   res.json({ ok: true, ts: new Date().toISOString() });
 });
 
-app.listen(PORT, "0.0.0.0", () => {
-  console.log("Backend running on http://0.0.0.0:4000");
+// ===== Analytics Endpoints =====
+
+app.get("/api/analytics/sensors", (req, res) => {
+  try {
+    const minerId = req.query.minerId || "MINER-001";
+    const hoursBack = parseInt(req.query.hoursBack || "24", 10);
+
+    const readings = getSensorReadings(minerId, hoursBack);
+    res.json({ ok: true, data: readings });
+  } catch (err) {
+    console.error("Error fetching sensor readings:", err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.get("/api/analytics/trends", (req, res) => {
+  try {
+    const minerId = req.query.minerId || "MINER-001";
+    const sensorName = req.query.sensor || "oxygen";
+    const hoursBack = parseInt(req.query.hoursBack || "24", 10);
+
+    const trends = getSensorTrends(minerId, sensorName, hoursBack);
+    res.json({ ok: true, sensor: sensorName, data: trends });
+  } catch (err) {
+    console.error("Error fetching sensor trends:", err);
+    res.status(400).json({ ok: false, error: err.message });
+  }
+});
+
+app.get("/api/analytics/hourly-averages", (req, res) => {
+  try {
+    const minerId = req.query.minerId || "MINER-001";
+    const sensorName = req.query.sensor || "oxygen";
+    const hoursBack = parseInt(req.query.hoursBack || "24", 10);
+
+    const averages = getAverageByHour(minerId, sensorName, hoursBack);
+    res.json({ ok: true, sensor: sensorName, data: averages });
+  } catch (err) {
+    console.error("Error fetching hourly averages:", err);
+    res.status(400).json({ ok: false, error: err.message });
+  }
+});
+
+app.get("/api/alerts/history", (req, res) => {
+  try {
+    const minerId = req.query.minerId || "MINER-001";
+    const hoursBack = parseInt(req.query.hoursBack || "24", 10);
+    const level = req.query.level || null;
+
+    const alerts = getAlertHistory(minerId, hoursBack, level);
+    res.json({ ok: true, data: alerts });
+  } catch (err) {
+    console.error("Error fetching alert history:", err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.get("/api/miners", (req, res) => {
+  try {
+    const miners = getAllMiners();
+    res.json({ ok: true, data: miners });
+  } catch (err) {
+    console.error("Error fetching miners:", err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.get("/api/miners/:minerId/latest", (req, res) => {
+  try {
+    const minerId = req.params.minerId;
+    const latestData = getMinerLatestData(minerId);
+    res.json({ ok: true, data: latestData });
+  } catch (err) {
+    console.error("Error fetching latest miner data:", err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.post("/api/miners/:minerId/profile", (req, res) => {
+  try {
+    const minerId = req.params.minerId;
+    const { name, contactInfo, healthProfile } = req.body;
+
+    updateMinerProfile(minerId, name || "", contactInfo || "", healthProfile || "");
+    res.json({ ok: true, message: "Profile updated" });
+  } catch (err) {
+    console.error("Error updating miner profile:", err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.post("/api/rescue/mission", (req, res) => {
+  try {
+    const { minerId, sensorData, locationData } = req.body;
+    const missionId = `MISSION-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+
+    createRescueMission(missionId, minerId || "MINER-001", sensorData, locationData);
+    res.json({ ok: true, missionId, message: "Rescue mission created" });
+  } catch (err) {
+    console.error("Error creating rescue mission:", err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
 });
